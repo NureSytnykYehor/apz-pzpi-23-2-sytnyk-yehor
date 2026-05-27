@@ -1,0 +1,937 @@
+                    МІНІСТЕРСТВО ОСВІТИ І НАУКИ УКРАЇНИ
+   ХАРКІВСЬКИЙ НАЦІОНАЛЬНИЙ УНІВЕРСИТЕТ РАДІОЕЛЕКТРОНІКИ
+
+
+
+                          Кафедра Програмної інженерії
+
+
+
+
+                                       Звіт
+                             з практичної роботи №1
+               з дисципліни: «Архітектура програмного забезпечення»
+
+
+
+
+Виконав:                                                              Перевірив:
+ст. гр. ПЗПІ-23-2                                               ст. викл. каф. ПІ
+Ситник Є. С.                                                      Сокорчук І. П.
+
+
+
+
+                                  Харків – 2026
+                                                                       2
+                                1 ІСТОРІЯ ЗМІН
+
+
+№     Дата       Версія звіту    Опис змін та виправлень
+1   26.05.2026       0.1         Оформлено повний текстовий звіт
+2   26.05.2026       0.2         Створено та прикріплено презентацію
+3   27.05.2026       1.0         Записано та прикріплено відео
+                                                                                3
+                                   2 ЗАВДАННЯ
+
+     Практичне заняття присвячене архітектурному аналізу реальної програмної
+системи. Завданням є дослідити не лише зовнішній інтерфейс обраної системи, але
+й внутрішній устрій: як організовані залежності між компонентами, які архітектурні
+рішення визначають масштабованість та надійність.
+     Відповідно до завдання необхідно:
+      а)   обрати програмну систему для аналізу;
+     б)    дослідити її архітектуру;
+     в)    підготувати доповідь;
+      г)   створити слайди презентації;
+     д)    записати відеозапис доповіді тривалістю 10–12 хвилин.
+     Для аналізу обрано текстовий редактор Neovim — форк Vim (2014),
+написаний мовою C з вбудованим інтерпретатором LuaJIT. Вибір зумовлений
+нетривіальною архітектурою: Neovim поєднує асинхронну подієву модель,
+міжпроцесовий протокол та вбудовану мову скриптингу у єдину систему.
+                                                                              4
+                       3 ОПИС ВИКОНАНОЇ РОБОТИ
+
+     3.1 Загальні відомості про систему
+
+     Назва системи: Neovim.
+     Розробник: Thiago de Arruda та спільнота відкритого програмного
+забезпечення.
+     Репозиторій: https://github.com/neovim/neovim
+     Мова реалізації: C + вбудований LuaJIT.
+     Neovim виник у 2014 році як форк Vim з метою усунення структурних
+обмежень оригінального редактора: Vim був однопотоковим, тому асинхронний
+введення-виведення там був неможливий без переписування ядра, а VimScript мав
+суттєві обмеження як мова скриптингу. Рішення полягало у заміні моделі вводу-
+виводу на libuv — кросплатформну бібліотеку асинхронних операцій — та у
+вбудуванні LuaJIT як основної мови конфігурації та плагінів.
+     Сьогодні Neovim — це не лише редактор, а програмована платформа
+редагування: через протокол msgpack-RPC будь-який зовнішній процес може
+контролювати його або вбудувати як рушій редагування у власне середовище.
+За даними Stack Overflow Developer Survey 2025, Neovim п’ятий рік поспіль є
+найулюбленішим редактором серед розробників.
+
+     3.2 Архітектурний стиль системи
+
+     Neovim не будувався з нуля — він виник як реакція на конкретні обмеження
+Vim. Кожне ключове архітектурне рішення пов’язане з недоліком, який воно усуває.
+     Шарова архітектура відповідає на питання стабільності інтерфейсу. П’ять
+рівнів — System, Core, C API, Lua stdlib, Client — із суворими однонаправленими
+залежностями дозволяють змінювати внутрішню реалізацію ядра, не порушуючи
+зовнішні плагіни та GUI. Lua stdlib будується виключно поверх C API і не має
+прямого доступу до структур Core.
+     Подієво-орієнтована модель є відповіддю на однопотоковість Vim. Усі
+джерела подій — клавіатура, LSP-сервери, таймери, файлова система — надходять
+до єдиної черги MultiQueue бібліотеки libuv і обробляються асинхронно: жодна
+підсистема не блокує введення користувача.
+                                                                           5
+     Клієнт-серверна архітектура через msgpack-RPC перетворила Neovim з
+редактора на платформу редагування. Стабільний двійковий протокол однаково
+підходить для зовнішніх GUI (Neovide, nvim-qt), плагінів будь-якою мовою та
+вбудовування редактора у IDE як рушія редагування (--embed).
+
+     3.3 Основні компоненти системи
+
+
+
+
+                    Рисунок 3.1 – Шарова архітектура Neovim
+
+     3.3.1 System
+
+     Фундамент архітектури — дві зовнішні бібліотеки. libuv надає єдиний
+кросплатформний цикл обробки подій: uv_loop_t обробляє сигнали операційної
+системи, uv_timer_t — таймери, uv_fs_event_t — спостерігачів за файловою
+системою. LuaJIT — вбудована віртуальна машина Lua з JIT-компіляцією; вона не
+запускається як окремий процес, а живе всередині nvim-процесу, що забезпечує
+нульові накладні витрати на виклики між C і Lua.
+
+     3.3.2 Core
+
+     Рівень   src/nvim/   містить усю логіку редактора, що не залежить від
+інтерфейсу: структуру буфера buf_T з B-деревом рядків memline, управління
+                                                                               6
+вікнами (window.c) та вкладками (tabpage.c), стан-машину режимів (state.c),
+систему автокоманд та undo-redo.
+
+      3.3.3 C API
+
+      Рівень src/nvim/api/ — стабільна публічна межа системи. Він експортує
+функції nvim_buf_, nvim_win_ тощо та містить диспетчер msgpack-RPC, що декодує
+вхідні повідомлення та маршрутизує їх до відповідних C-функцій.
+
+      3.3.4 Lua stdlib
+
+      Рівень runtime/lua/ реалізує vim.lsp, vim.treesitter, vim.diagnostic,
+vim.keymap та інші модулі виключно через vim.api. — публічний C API. Це
+
+принципово: жоден Lua-модуль не звертається до внутрішніх структур Core
+напряму.
+
+      3.3.5 Client
+
+      Термінальний інтерфейс користувача (TUI) є єдиним клієнтом, що звертається
+до C API напряму. Усі інші — зовнішні GUI, Remote plugins, вбудовані клієнти —
+підключаються через msgpack-RPC канали.
+
+      3.4 Взаємодія компонентів
+
+      3.4.1 Ключові структури даних
+
+      buf_T — центральна C-структура буфера:
+
+
+1   typedef struct {
+2     handle_T   b_fnum;        // унікальний ID
+3     memline_T b_ml;           // B-tree рядків
+4     pos_T      b_last_cursor; // остання позиція
+5     // extmarks, highlights, LSP state...
+6   } buf_T;
+
+
+      memline — B-дерево для зберігання рядків буфера. Забезпечує O(log n) доступ
+
+за номером рядка та підтримує своп-файл для великих документів.
+                                                                                7
+      Extmark — мітка, прив’язана до позиції (рядок:колонка) у тексті. Автоматично
+
+переміщується при редагуванні — це основа для підсвітки від LSP, діагностики і
+позначок git.
+      Window та Tabpage утворюють ієрархію: одна вкладка містить кілька вікон,
+
+кожне вікно посилається на buf_T, зберігає позицію курсора w_cursor і перший
+видимий рядок w_topline. Один буфер може бути відкритий у кількох вікнах
+одночасно.
+      ModeValue — перелічуваний тип режимів редактора:
+
+
+1   typedef enum {
+2     MODE_NORMAL,
+3     MODE_INSERT,
+4     MODE_VISUAL,
+5     MODE_CMDLINE,
+6     MODE_TERMINAL,
+7     // ...
+8   } ModeValue;
+
+
+      Поточний режим визначає, як state_enter інтерпретує вхідні події.
+
+      3.4.2 Система каналів msgpack-RPC
+
+
+
+
+                 Рисунок 3.2 – Архітектура каналів msgpack-RPC
+
+      Протокол msgpack-RPC складається з трьох типів повідомлень:
+                                                                              8
+
+1   [type, msgid, method, params]      // запит
+2   [type, msgid, error, result]       // відповідь
+3   [type,        event, args ]        // notification
+
+
+      Канали розрізняються за транспортом: stdio — Neovim запущений як
+підпроцес зовнішнім клієнтом (--embed); socket — для зовнішнього підключення
+через TCP або Unix-сокет; pipe — Neovim сам запустив плагін-хост як підпроцес;
+pty — для термінальних процесів.
+
+      UI-події — окремий підрежим: зовнішній графічний інтерфейс підписується
+через nvim_ui_attach і починає отримувати потік сповіщень win_pos, cursor_goto,
+popupmenu_show. Термінальний інтерфейс є внутрішнім клієнтом і звертається до
+
+C API напряму, оминаючи RPC-шар. Зовнішні плагіни запускаються як окремі
+процеси — збій плагіна не зупиняє редактор.
+
+      3.4.3 Цикл обробки подій libuv
+
+      Серце Neovim — функція state_enter, що в циклі читає наступну подію від
+libuv і передає її поточному обробнику стану. Структура Loop має три черги:
+
+1   typedef struct {
+2     uv_loop_t    uv;           // libuv петля
+3     MultiQueue events;        // основна черга
+4     MultiQueue thread_events; // з фонових потоків
+5     MultiQueue fast_events;   // пріоритетні події
+6   } Loop;
+
+
+      Джерела подій: натискання клавіш, LSP-відповіді, таймери, спостерігачі за
+файловою системою, RPC-виклики від плагінів. На відміну від Vim, усі ці операції
+є асинхронними і не блокують введення.
+                                                                            9
+      3.4.4 Потік обробки LSP запиту
+
+
+
+
+           Рисунок 3.3 – Потік обробки LSP запиту (на прикладі hover)
+
+      vim.lsp — Lua-шар поверх RPC. Запит vim.lsp.buf.hover() проходить через
+
+buf_request, client:request, channel:rpc_send і асинхронний libuv. LSP-сервер
+
+отримує запит і надсилає відповідь. Зворотний виклик libuv декодує відповідь і
+передає обробнику.
+      Ключова деталь — vim.schedule: з асинхронного зворотного виклику не
+можна напряму викликати nvim API, оскільки це призводить до гонки даних.
+vim.schedule ставить виклик у чергу головного циклу:
+
+
+1   client:request('textDocument/hover', params, function(err, result)
+2     vim.schedule(function()
+3       vim.lsp.util.open_floating_preview(result.contents)
+4     end)
+5   end)
+
+
+      3.4.5 Інтеграція LuaJIT
+
+      LuaJIT вбудований безпосередньо в nvim — не як окремий процес.
+Конфігурація — init.lua, плагіни завантажуються через require(). Міст між C і
+Lua організований у три шари: Lua stdlib поверх C API поверх LuaJIT VM.
+      Простори імен:
+                                                                               10
+
+1   vim.api        -- nvim_ C функції
+2   vim.fn         -- вбудовані VimScript функції
+3   vim.opt        -- опції (:set)
+4   vim.lsp        -- LSP клієнт
+5   vim.treesitter -- tree-sitter API
+6   vim.uv         -- libuv (async I/O)
+7   vim.keymap     -- маппінги
+
+
+      vim.uv надає прямий доступ до libuv з Lua:
+
+
+1   local timer = vim.uv.new_timer()
+2   timer:start(1000, 0, vim.schedule_wrap(
+3     function() vim.cmd('write') end
+4   ))
+
+
+      3.4.6 Інтеграція tree-sitter
+
+      tree-sitter — інкрементальний парсер: при зміні буфера повторно аналізується
+лише змінений регіон, а не весь файл. Результат — абстрактне синтаксичне
+дерево (AST), що використовується для підсвітки через запити, текстових об’єктів,
+згортання рядків та обчислення відступів.
+      Запити — декларативні S-expression патерни:
+
+1   (function_declaration
+2     name: (identifier) @function.name)
+3
+4   (call_expression
+5     function: (identifier) @function.call)
+
+
+      Граматики компілюються у .so бібліотеки і завантажуються динамічно.
+Neovim включає близько 100 граматик за замовчуванням.
+
+      3.4.7 Система плагінів
+
+      Neovim підтримує три типи плагінів.
+      Вбудовані Lua-плагіни — виконуються в тому самому процесі, прямий доступ
+до vim.api через require().
+      Зовнішні плагіни — окремий процес будь-якою мовою: Python (pynvim),
+Node.js (neovim npm), Ruby (neovim gem). Спілкуються через msgpack-RPC, збій
+плагіна не зупиняє редактор.
+      Сумісні з Vim — .vim файли на VimScript для зворотної сумісності.
+                                                                                 11
+     Важлива архітектурна особливість: уся вбудована функціональність Neovim
+— LSP, tree-sitter — реалізована через ті самі публічні програмні інтерфейси, що
+доступні плагінам.
+
+     3.5 Масштабованість та надійність
+
+     3.5.1 Режими запуску
+
+     Neovim підтримує три режими запуску без графічного інтерфейсу: headless
+(--headless) — для скриптів і безперервної інтеграції; embedded (--embed) —
+Neovim керується зовнішнім процесом через stdio; listen (--listen /tmp/nvim.sock)
+— Neovim слухає підключення на сокеті.
+
+     3.5.2 Тестування
+
+      –    busted — модульні тести Lua;
+
+      –    функціональні тести через RPC (nvim_command тощо);
+      –    screen_tests — перевірка відображення через TestBackend;
+
+      –    безперервна інтеграція на Linux, macOS та Windows.
+
+     3.5.3 Продуктивність
+
+Таблиця 3.1 – Техніки продуктивності Neovim
+ Техніка                Застосування
+ LuaJIT JIT             конфіг і плагіни у 10–50 разів швидше VimScript
+ vim.schedule           безпечний виклик API з асинхронного контексту
+ vim.uv                 неблокуючий введення-виведення без співпрограм
+ Incremental parsing    tree-sitter повторно аналізує лише змінений регіон AST
+ nvim_buf_set_lines     пакетний API мінімізує кількість RPC-звернень
+
+
+     Уся обробка LSP та tree-sitter виконується асинхронно через libuv, тому
+інтерфейс ніколи не блокується на мережевих або дискових операціях.
+                                                                                12
+                                  4 ВИСНОВКИ
+
+     У результаті виконання практичного заняття:
+      –   досліджено архітектуру текстового редактора Neovim, що поєднує
+          шарову, подієво-орієнтовану та клієнт-серверну архітектурні моделі;
+      –   визначено, що провідним структурним принципом є шарова архітектура
+          з п’ятьма рівнями та суворою ієрархією залежностей;
+      –   проаналізовано ключові структури даних: buf_T та memline для зберігання
+          тексту, Extmark для анотацій у тексті, Window і Tabpage для ієрархії
+          відображення, Loop для циклу обробки подій;
+      –   описано    протокол     msgpack-RPC,   що     перетворює   Neovim     на
+          програмований сервер редагування зі стабільним публічним протоколом
+          для GUI, плагінів та автоматизації;
+      –   оцінено архітектурні рішення щодо продуктивності: LuaJIT забезпечує
+          10–50-кратне прискорення відносно VimScript, асинхронний введення-
+          виведення через libuv не блокує інтерфейс, tree-sitter повторно аналізує
+          лише змінені регіони;
+      –   сформовано практичні навички архітектурного аналізу програмних
+          систем.
+     Архітектура Neovim демонструє, як єдина асинхронна основа (libuv),
+стабільний публічний протокол (msgpack-RPC) та повноцінна вбудована мова
+програмування (LuaJIT) перетворюють текстовий редактор на платформу: GUI,
+IDE-фронтенди, тестові фреймворки і CI-скрипти спілкуються з ним через той
+самий протокол, що й вбудовані підсистеми.
+                                                                                 13
+                     5 ВИКОРИСТАНІ ДЖЕРЕЛА
+
+–   Neovim Architecture Overview. neovim/neovim: ARCHITECTURE.md. —
+    https://github.com/neovim/neovim/blob/master/ARCHITECTURE.md
+–   Neovim Source Code. neovim/neovim. — https://github.com/neovim/neovim
+–   Neovim Developer Documentation. dev_arch.txt. — https://github.com/
+    neovim/neovim/blob/master/runtime/doc/dev_arch.txt
+–   DeepWiki: Neovim Architecture. — https://deepwiki.com/neovim/neovim
+–   libuv Documentation. — https://libuv.org/
+–   Microsoft. Language Server Protocol Specification. — https://microsoft.
+    github.io/language-server-protocol/
+–   tree-sitter: An Incremental Parsing System. — https://tree-sitter.github.io/tree-
+    sitter/
+                                                       14
+                               ДОДАТОК А
+                               Відеозапис
+
+Відеозапис презентації: https://youtu.be/rQSwLkm4hz4
+Хронологічний опис відеозапису:
+00:00 Вступ
+00:12 Що таке Neovim?
+00:52 Три архітектурні стилі
+01:35 Шарова архітектура Neovim
+02:22 msgpack-RPC: архітектура каналів
+02:48 msgpack-RPC: деталі
+03:45 Event Loop: libuv
+04:19 LuaJIT інтеграція
+04:56 Система плагінів
+05:34 Потік обробки LSP запиту
+06:14 Tree-sitter інтеграція
+07:03 Ключові структури даних: буфер
+07:45 Ключові структури даних: вікна та режими
+08:13 Масштабованість та надійність
+09:17 Висновки
+                                                                                                                 15
+                                                    ДОДАТОК Б
+                                                     Презентація
+
+
+
+
+ nvim — архітектура
+ Модальний редактор нового покоління
+
+
+
+ Практичне заняття №2 · Архітектура програмного забезпечення
+ Ситник Є. С. · ПЗПІ-23-2
+ ХНУРЕ · 2026
+
+
+
+
+                                              Рисунок Б.1 – Вступ
+
+
+
+
+Що таке Neovim?
+
+Neovim — гіперрозширюваний текстовий редактор, форк            Ключові можливості:
+Vim (2014)
+                                                                Можливість      Реалізація
+ → Мова ядра: C + вбудований LuaJIT
+                                                                Scripting       LuaJIT (вбудований)
+ → Автор: Thiago de Arruda + OSS-спільнота
+                                                                LSP клієнт       vim.lsp   (Lua)
+ → Ліцензія: Apache 2.0
+                                                                Синтаксис       tree-sitter
+ → Репозиторій: neovim/neovim (GitHub)
+                                                                IPC протокол    msgpack-RPC
+Мотивація форку:
+                                                                Async I/O       libuv
+ → Async I/O в однопотоковому Vim — неможливий
+                                                                Remote UI       UI events over RPC
+ → VimScript — повільний, незручний
+ → Вбудований термінальний емулятор                            У 2025 році — п'ятий рік поспіль найулюбленіший
+ → Зовнішні UI без змін ядра                                   редактор у Stack Overflow Developer Survey
+
+
+
+
+                                                                                                                 2
+
+
+
+
+                                    Рисунок Б.2 – Що таке Neovim?
+                                                                                                                                                                                    16
+
+
+
+
+ Три архітектурні стилі
+
+ Шарова                                                                               Подієво-орієнтована                                Клієнт-серверна
+
+ Layered Architecture                                                                 Event-Driven                                       Client-Server via RPC
+
+ 5 шарів: від libuv до Lua stdlib                                                       libuv event loop + MultiQueue                     msgpack-RPC протокол
+
+ Залежності — лише донизу:                                                            Усі події ОС, LSP, плагінів — через                Будь-який процес може керувати
+                                                                                      єдину чергу:                                       nvim:
+   → ізоляція підсистем
+   → незалежне тестування                                                                   → non-blocking I/O                                → remote GUI (Neovide)
+                                                                                            → async без блокування UI                         → remote plugins (Python, Node)
+                                                                                                                                              → headless ( --embed )
+
+
+
+
+                                                                                                                                                                                    3
+
+
+
+
+                                                                Рисунок Б.3 – Три архітектурні стилі
+
+
+
+Шарова архітектура Neovim
+5 рівнів залежностей                                                                                                Рівні:
+              Клієнтський рівень
+
+
+
+                  Remote plugins              Remote GUI            TUI
+                                                                                                                     Рівень         Компоненти
+
+                                                                                                                                    GUI (Neovide, nvim-qt), remote
+                                      msgpack-RPC msgpack-RPC
+                                                                                                                     Client
+                              C API
+                                                                           Lua stdlib
+                                                                                                                                    plugins
+
+                                   msgpack-RPC dispatcher                                                            Lua
+                                                                                                                                     vim.lsp ,    vim.treesitter ,
+                                                                                vim.lsp / vim.treesitter / vim.ui
+                                   Channel manager                                                                                                                     vim.ui
+                                                                                                                     stdlib
+                                                                                vim.api.*
+
+                                                                                                                     C API           nvim_*    функції, msgpack-RPC dispatch
+                                                 nvim_* API                             vim.uv
+
+                                                                                                                     Core           buffer, window, mode, autocommands
+   Core
+                                                                                                                     System         libuv, filesystem, процеси
+      buf_T / memline / extmark             window / autocommands
+
+
+                                                                                                                      Lua stdlib будується поверх C API — жодного прямого доступу
+                System
+                                                                                                                      до внутрішніх структур. Це дозволяє стабілізувати публічний
+                   filesystem / processes           libuv           LuaJIT VM                                         інтерфейс незалежно від рефакторингу ядра.
+
+
+
+
+                                                                                                                                                                                    4
+
+
+
+
+                                                     Рисунок Б.4 – Шарова архітектура Neovim
+                                                                                                                                       17
+
+
+
+msgpack-RPC: архітектура каналів
+
+                                       Remote GUI        Remote plugin            Embedded client
+
+
+
+                                                    socket      stdio pipe        stdio pipe / socket
+
+
+                                                                nvim process
+
+
+                                                        Channel manager
+
+
+
+
+                                                    msgpack-RPC dispatcher              TUI
+
+
+
+                                                                                  direct calls
+
+
+
+
+                                                                   C API
+
+
+
+
+                                                                                                                                       5
+
+
+
+
+                      Рисунок Б.5 – msgpack-RPC: архітектура каналів
+
+
+
+
+ msgpack-RPC: деталі
+
+ Типи каналів ( Channel ):                                          Протокол
+
+
+   stdio    — вбудований режим (--embed)                                 [type, msgid, method, params]               // запит
+   socket   — TCP або Unix socket                                        [type, msgid, error,             result]    // відповідь
+   pipe     — дочірній процес                                            [type,                  event,   args   ]   // notification
+   pty      — термінальний процес
+
+                                                                    Remote plugins
+ UI events — спеціальний підклас RPC:
+                                                                    Провайдери ( provider ):
+   → win_pos , cursor_goto , popupmenu_show , ...
+                                                                         → python3 — pynvim
+   → Remote GUI підписується через nvim_ui_attach
+                                                                         → node — neovim npm package
+   → TUI — локальний UI, обходить RPC рівень
+                                                                         → ruby — neovim gem
+
+
+
+
+                                                                                                                                       6
+
+
+
+
+                                    Рисунок Б.6 – msgpack-RPC: деталі
+                                                                                                                                18
+
+
+
+Event Loop: libuv
+
+main_loop — серце Neovim                                              Джерела подій:
+
+  // Псевдокод `state_enter`
+                                                                        → Натискання клавіш (stdin / TUI)
+  def state_enter(on_state, data):                                      → LSP відповіді (async через канали)
+    do
+         event = read_next_event() # Read an event from the OS          → Filesystem watchers ( vim.uv.new_fs_event )
+    while on_state(data, event) # Invoke callback for current state
+                                                                        → Таймери ( vim.uv.new_timer )
+                                                                        → RPC виклики від плагінів
+Структура Loop :
+                                                                      loop_poll_events перевіряє Loop.uv і
+
+  typedef struct {                                                    Loop.fast_events коли nvim idle, а також при
+    uv_loop_t         uv;                                             os_breakcheck .
+    MultiQueue       *events;
+    MultiQueue       *thread_events;                                   На відміну від Vim, усі LSP/DAP відповіді обробляються
+    MultiQueue       *fast_events;                                     асинхронно — вони не блокують введення користувача.
+  } Loop;
+
+
+
+
+                                                                                                                                7
+
+
+
+
+                                            Рисунок Б.7 – Event Loop: libuv
+
+
+
+LuaJIT інтеграція
+
+LuaJIT                                                                C <-> Lua міст
+
+LuaJIT вбудований безпосередньо в nvim (не окремий                     Шар              Компоненти
+процес):
+                                                                       Lua stdlib        vim.lsp ,   vim.treesitter ...
+ → Конфігурація: init.lua                                              C API             nvim_buf_* ,   nvim_win_* ...
+ → Плагіни: require('plugin')
+                                                                       LuaJIT VM         luaL_*   / lua_* C API
+ → Доступ до C API: vim.api.*
+                                                                      vim.uv — прямий доступ до libuv:
+Namespaces:
+
+                                                                        local timer = vim.uv.new_timer()
+  vim.api           -- nvim_* C функції
+                                                                        timer:start(1000, 0, vim.schedule_wrap(
+  vim.fn            -- вбудовані VimScript функції
+                                                                             function() vim.cmd('write') end
+  vim.opt           -- опції (:set)
+                                                                        ))
+  vim.lsp           -- LSP клієнт
+  vim.treesitter -- tree-sitter API
+  vim.uv            -- libuv (async I/O)
+  vim.keymap        -- маппінги
+
+
+
+
+                                                                                                                                8
+
+
+
+
+                                           Рисунок Б.8 – LuaJIT інтеграція
+                                                                                                                                                                19
+
+
+
+
+ Система плагінів
+ Native Lua plugins                                  Remote plugins                                                          Vim-compatible plugins
+
+  → Завантажуються через                                    → Окремий процес (Python / Node /                                   → .vim файли через Vimscript
+   require()                                                Ruby)                                                               → Зворотна сумісність з Vim
+  → Прямий доступ до vim.api                                → Спілкуються через msgpack-RPC
+  → Виконуються в тому самому                               → Ізольовані від ядра
+  процесі
+  → Найшвидший варіант
+
+  Neovim свідомо обрав розширюваність як основну цінність: уся вбудована функціональність (LSP, treesitter) реалізована
+  через ті самі API, що доступні плагінам. Remote plugins запускаються як окремі процеси — збій плагіна не "роняє" редактор.
+
+
+
+
+                                                                                                                                                               9
+
+
+
+
+                                           Рисунок Б.9 – Система плагінів
+
+
+
+
+Потік обробки LSP запиту
+                                               vim.lsp                         LSP client         Channel              LSP server         vim.lsp.util
+                         Користувач          (Lua stdlib)                      (C + Lua)           (libuv)         (clangd, pyright...)      (UI)
+
+                              vim.lsp.buf.hover()
+
+                                                    buf_request(
+                                                     'textDocument/hover', params)
+
+                                                                                     encode JSON-RPC
+                                                                                     + async write
+
+                                                                                                        stdin / socket
+                                                                                                        { method, params }
+
+                                                                                                         stdout / socket
+                                                                                                         { result }
+
+                                                                                      libuv callback
+                                                                                      decode JSON-RPC
+
+                                                     handler(err, result)
+
+                                                    vim.schedule(callback)
+
+
+                                                    open_floating_preview(
+                                                     result.contents)
+
+                                floating window
+
+
+                         Користувач            vim.lsp                         LSP client         Channel              LSP server         vim.lsp.util
+                                             (Lua stdlib)                      (C + Lua)           (libuv)         (clangd, pyright...)      (UI)
+
+
+
+
+                                                                                                                                                               10
+
+
+
+
+                            Рисунок Б.10 – Потік обробки LSP запиту
+                                                                                                                  20
+
+
+Tree-sitter інтеграція
+
+Інкрементальний парсинг                               vim.treesitter API:
+
+
+  Буфер змінився                                       -- Отримати вузол під курсором
+    └─ ts_parser_parse_with()                          local node = vim.treesitter
+            └─ лише змінені вузли AST                    .get_node({ bufnr = 0 })
+
+
+  Результат: синтаксичне дерево                        -- Текст вузла
+    └─ підсвітка → захоплення через queries            local text = vim.treesitter
+    └─ text objects → @function.inner                    .get_node_text(node, 0)
+    └─ folding → @fold
+    └─ indentation → @indent                           -- Парсер для буфера
+                                                       local parser = vim.treesitter
+                                                         .get_parser(bufnr, 'lua')
+Queries — декларативні патерни:
+                                                       local tree = parser:parse()[1]
+                                                       local root = tree:root()
+  (function_declaration
+    name: (identifier) @function.name)
+
+                                                       tree-sitter граматики компілюються у .so бібліотеки і
+  (call_expression                                     завантажуються динамічно. Neovim включає ~100
+    function: (identifier) @function.call)             граматик з коробки.
+
+                                                                                                                 11
+
+
+
+
+                                  Рисунок Б.11 – Tree-sitter інтеграція
+
+
+
+
+Ключові структури даних: буфер
+
+buf_T — центральна структура                          memline — B-tree буфера
+
+                                                       → Зберігає рядки як вузли B-дерева
+  typedef struct {
+    handle_T      b_fnum;        // унікальний ID      → O(log n) доступ за номером рядка
+    memline_T     b_ml;          // B-tree рядків      → Swap-файл для великих буферів
+    pos_T         b_last_cursor; // остання позиція
+                                                      Extmark — мітка у тексті
+    // extmarks, highlights, LSP statefulness...
+  } buf_T;
+                                                       → Прив'язана до позиції (рядок:колонка)
+                                                       → Переміщується автоматично при редагуванні
+                                                       → Основа для: LSP highlights, diagnostics, git signs...
+
+
+
+
+                                                                                                                 12
+
+
+
+
+                          Рисунок Б.12 – Ключові структури даних: буфер
+                                                                                                                   21
+
+
+
+
+Ключові структури даних: вікна та режими
+
+Window і Tabpage                                           Стан режиму:
+
+  Tabpage                                                    typedef enum {
+    └─ Window (поточне)                                        MODE_NORMAL,
+    └─ Window                                                  MODE_INSERT,
+            ├─ buf_T *w_buffer   // буфер у вікні              MODE_VISUAL,
+            ├─ pos_T w_cursor    // позиція курсора            MODE_CMDLINE,
+            └─ int   w_topline   // перший видимий рядок       MODE_TERMINAL,
+                                                               // ...
+                                                             } ModeValue;
+
+
+
+
+                                                                                                                  13
+
+
+
+
+                Рисунок Б.13 – Ключові структури даних: вікна та режими
+
+
+
+
+Масштабованість та надійність
+
+Тестування:                                                Продуктивність:
+
+ → busted — Lua unit тести                                  → LuaJIT JIT - конфіг і плагіни 10–50× швидше
+ → Functional тести через RPC ( nvim_command etc.)          VimScript
+
+ → screen_tests — перевірка рендеру через                   → vim.schedule - безпечний виклик API з async
+  TestBackend                                               → vim.uv - non-blocking I/O без coroutines
+ → CI на Linux / macOS / Windows                            → Incremental parsing - tree-sitter — лише diff AST
+                                                            → nvim_buf_set_lines - batch API — мінімум RPC
+                                                            round-trips
+
+
+
+
+                                                                                                                  14
+
+
+
+
+                         Рисунок Б.14 – Масштабованість та надійність
+                                                                                                                    22
+
+
+
+Висновки
+
+Архітектурні рішення Neovim:                             Що робить архітектуру особливою:
+
+ → libuv event loop — єдина async основа для всіх         Neovim — це платформа, а не просто редактор. msgpack-
+ підсистем                                                RPC перетворює nvim на програмований сервер
+ → msgpack-RPC — стабільний протокол для GUI,             редагування: GUI, IDE-фронтенди, тестові фреймворки і
+ плагінів, автоматизації                                  CI-скрипти спілкуються з ним через той самий протокол.
+
+ → LuaJIT вбудований — конфігурація як повноцінна
+ мова програмування                                      Джерела:
+
+ → Lua stdlib поверх C API — чітке розмежування рівнів    → neovim/neovim (GitHub)
+ абстракції                                               → dev_arch.txt — офіційна документація архітектури
+ → Remote plugins — ізоляція збоїв, мова не важлива       → deepwiki.com/neovim/neovim
+Ключові структури:                                        → Language Server Protocol Specification
+buf_T · memline · Extmark · Channel · Loop
+                                                          → libuv documentation
+
+
+
+                                                                                                                   15
+
+
+
+
+                                     Рисунок Б.15 – Висновки
+
+
+
+
+ Дякую за увагу
+ :q!
+
+
+
+ Ситник Є. С. · ПЗПІ-23-2 · 2026
+  github.com/neovim/neovim
+
+
+
+
+                                    Рисунок Б.16 – Завершення
+                                                                            23
+                                  ДОДАТОК В
+                                  Запити до ШІ
+
+     Назва інструменту та версія: Claude Sonnet 4.6
+     Мета використання: дослідження архітектури Neovim, визначення ключових
+архітектурних концепцій, розробка UML-діаграм та підготовка структури доповіді.
+     Внесок автора: самостійне формулювання запитів, вивчення вихідного
+коду Neovim та офіційної документації, оцінювання запропонованих пояснень,
+верифікація відповідей за реальним кодом, написання доповіді, створення UML-
+діаграм, оформлення презентації та відеодоповіді.
+     Запит: «Досліди архітектуру текстового редактора Neovim: проаналізуй
+шарову структуру, систему каналів msgpack-RPC, цикл обробки подій libuv,
+інтеграцію LuaJIT та tree-sitter, ключові структури даних та систему плагінів.
+Поверни детальний технічний огляд».
+     Відповідь: Інструмент проаналізував офіційну документацію і надав
+комплексний технічний огляд: описав п’ять рівнів шарової архітектури, протокол
+msgpack-RPC з трьома типами повідомлень і чотирма типами каналів, потік
+LSP-запиту від vim.lsp.buf.hover() до спливаючого вікна, структури buf_T/
+memline/Extmark/Window/Tabpage,   інтеграцію LuaJIT через простори імен vim.,
+інкрементальний парсинг tree-sitter та три типи плагінів.
+
